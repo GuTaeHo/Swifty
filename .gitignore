@@ -1,0 +1,24 @@
+# macOS
+.DS_Store
+
+# IDE user state
+.idea/
+.vscode/
+xcuserdata/
+*.xcuserstate
+
+# Xcode output
+DerivedData/
+
+# Gradle and Android output
+.gradle/
+**/build/
+local.properties
+.externalNativeBuild/
+.cxx/
+captures/
+
+# Signing material
+*.jks
+*.keystore
+keystore.properties
