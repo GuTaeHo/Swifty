@@ -1,10 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Launch theme only. Every colour the user sees comes from the Compose Material 3 scheme. -->
-    <style name="Theme.Swifty" parent="android:style/Theme.Material.Light.NoActionBar">
+    <style name="Theme.Swifty" parent="android:style/Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/window_background</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
-        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightStatusBar">false</item>
     </style>
 </resources>
