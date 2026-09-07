@@ -12,6 +12,7 @@ DerivedData/
 
 # Gradle and Android output
 .gradle/
+.kotlin/
 **/build/
 local.properties
 .externalNativeBuild/
