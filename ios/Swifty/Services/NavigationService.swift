@@ -36,12 +36,19 @@ final class NavigationService {
     // MARK: - 상태
 
     private(set) var destination: Destination? {
-        didSet { destination?.persist() }
+        didSet {
+            if persistsDestination {
+                destination?.persist()
+            }
+        }
     }
     private(set) var route: MKRoute?
     private(set) var isCalculatingRoute = false
     private(set) var routeErrorMessage: String?
     private(set) var estimate: Estimate?
+
+    /// 지도에서 확정 전 경로를 계산하는 인스턴스는 목적지를 저장하지 않는다.
+    private let persistsDestination: Bool
 
     /// 목적지를 정한 시점(정확히는 그 뒤 첫 유효 fix)의 고도 (m).
     /// iOS에는 임의 좌표의 지형 고도를 조회하는 공개 API가 없어서
@@ -56,6 +63,7 @@ final class NavigationService {
         didSet {
             guard transport != oldValue else { return }
             // 이동수단이 바뀌면 이전 경로는 더 이상 맞지 않는다.
+            cancelRouteRequest()
             clearRoute()
             routeErrorMessage = nil
         }
@@ -74,6 +82,7 @@ final class NavigationService {
     private var lastRouteOrigin: CLLocation?
     private var lastRouteDate: Date?
     private var routeTask: Task<Void, Never>?
+    private var activeRouteRequestID: UUID?
 
     /// 경로를 다시 계산할 조건.
     private let recalculateAfter: TimeInterval = 25
@@ -81,13 +90,15 @@ final class NavigationService {
     /// 경로가 아예 성립하지 않는 이동수단(비행기)인지.
     private var routingUnavailable: Bool { transport.directionsTransportType == nil }
 
-    init() {
-        destination = Destination.loadPersisted()
+    init(restoresPersistedDestination: Bool = true) {
+        persistsDestination = restoresPersistedDestination
+        destination = restoresPersistedDestination ? Destination.loadPersisted() : nil
     }
 
     // MARK: - 목적지 조작
 
     func setDestination(_ new: Destination, from origin: CLLocation?, online: Bool) {
+        cancelRouteRequest()
         destination = new
         legStartAltitude = nil
         elevationChange = nil
@@ -100,15 +111,23 @@ final class NavigationService {
     }
 
     func clearDestination() {
-        routeTask?.cancel()
-        routeTask = nil
+        cancelRouteRequest()
         destination = nil
         estimate = nil
         legStartAltitude = nil
         elevationChange = nil
         routeErrorMessage = nil
         clearRoute()
-        Destination.clearPersisted()
+        if persistsDestination {
+            Destination.clearPersisted()
+        }
+    }
+
+    private func cancelRouteRequest() {
+        routeTask?.cancel()
+        routeTask = nil
+        activeRouteRequestID = nil
+        isCalculatingRoute = false
     }
 
     private func clearRoute() {
@@ -205,6 +224,8 @@ final class NavigationService {
         lastRouteOrigin = origin
         lastRouteDate = Date()
         isCalculatingRoute = true
+        let requestID = UUID()
+        activeRouteRequestID = requestID
 
         let request = MKDirections.Request()
         request.source = MKMapItem(placemark: MKPlacemark(coordinate: origin.coordinate))
@@ -215,18 +236,26 @@ final class NavigationService {
         routeTask = Task { [weak self] in
             defer {
                 Task { @MainActor in
+                    guard self?.activeRouteRequestID == requestID else { return }
                     self?.isCalculatingRoute = false
                     self?.routeTask = nil
+                    self?.activeRouteRequestID = nil
                 }
             }
             do {
                 let response = try await MKDirections(request: request).calculate()
                 guard let best = response.routes.first else { return }
-                await MainActor.run { self?.apply(route: best) }
+                await MainActor.run {
+                    guard self?.activeRouteRequestID == requestID,
+                          self?.destination?.id == destination.id else { return }
+                    self?.apply(route: best)
+                }
             } catch is CancellationError {
                 return
             } catch {
                 await MainActor.run {
+                    guard self?.activeRouteRequestID == requestID,
+                          self?.destination?.id == destination.id else { return }
                     // 이미 경로가 있으면 그걸 계속 쓰고, 없을 때만 사용자에게 알린다.
                     if self?.route == nil {
                         let mode = self?.transport.title ?? ""

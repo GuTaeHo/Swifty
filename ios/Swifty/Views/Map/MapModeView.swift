@@ -1,7 +1,7 @@
 import SwiftUI
 import MapKit
 
-/// 지도 모드. 현위치, 목적지 선택(지도 탭 / 검색), 경로, 속도, 남은 거리·시간을 보여준다.
+/// 지도 모드. 현위치, 목적지 미리보기·확정, 경로, 속도, 남은 거리·시간을 보여준다.
 ///
 /// MapKit은 공개 API로 지도 타일을 미리 받아둘 수 없으므로 오프라인에서는
 /// 지도를 쓸 수 없다. 연결이 끊기면 화면을 덮고 계기판 모드로 안내한다.
@@ -16,6 +16,8 @@ struct MapModeView: View {
     @State private var camera: MapCameraPosition = .userLocation(fallback: .automatic)
     @State private var showingSearch = false
     @State private var showingSettings = false
+    /// 탭하거나 길게 누른 위치의 경로를 목적지 확정 전에 계산한다.
+    @State private var previewNavigation = NavigationService(restoresPersistedDestination: false)
     /// 한 번의 누름에서 핀이 두 번 찍히지 않게 막는다.
     @State private var didDropPin = false
 
@@ -73,12 +75,20 @@ struct MapModeView: View {
                                    unit: appState.unitSystem,
                                    transport: appState.transport,
                                    origin: location.location) { destination in
-                apply(destination)
+                preview(destination)
             }
         }
         .onChange(of: location.location?.coordinate.latitude) {
             search.updateRegion(center: location.location?.coordinate)
         }
+        .onChange(of: location.lastFixDate) { refreshPreview() }
+        .onChange(of: location.clock) { refreshPreview() }
+        .onChange(of: isOnline) { refreshPreview() }
+        .onChange(of: appState.transport) { _, mode in
+            previewNavigation.transport = mode
+            refreshPreview()
+        }
+        .onDisappear { cancelPreview() }
     }
 
     // MARK: - 지도
@@ -88,14 +98,14 @@ struct MapModeView: View {
             Map(position: $camera, interactionModes: .all) {
                 UserAnnotation()
 
-                if let route = navigation.route {
+                if let route = displayedNavigation.route {
                     MapPolyline(route.polyline)
                         .stroke(palette.accent, style: StrokeStyle(lineWidth: 6,
                                                                  lineCap: .round,
                                                                  lineJoin: .round))
                 }
 
-                if let destination = navigation.destination {
+                if let destination = displayedNavigation.destination {
                     Annotation(destination.name, coordinate: destination.coordinate) {
                         DestinationPin()
                     }
@@ -107,11 +117,16 @@ struct MapModeView: View {
                 MapCompass()
                 MapScaleView()
             }
-            // Apple 지도와 같은 방식으로, 길게 눌러 목적지 핀을 찍는다.
-            // 짧은 탭은 지도의 기본 동작(POI 선택)에 그대로 남겨둔다.
+            // 탭 제스처로만 위치를 고른다. DragGesture로 탭을 흉내 내면 지도의
+            // 이동 제스처와 겹치는 사이 이동 거리가 초기화되어, 지도를 끌었을 뿐인데
+            // 짧은 탭으로 판정되는 일이 있었다. 탭 제스처는 손가락이 움직이면
+            // 스스로 실패하므로 지도 이동이 목적지 선택으로 새지 않는다.
+            .onTapGesture(coordinateSpace: .local) { point in
+                previewPin(at: point, proxy: proxy)
+            }
             //
-            // 길게 눌러 목적지를 찍는다. 손을 떼는 순간이 아니라
-            // 누르고 있는 상태에서 0.45초가 지나는 순간 바로 찍힌다.
+            // 길게 누르기도 같은 미리보기를 연다. 손을 떼는 순간이 아니라
+            // 누르고 있는 상태에서 0.45초가 지나면 바로 표시한다.
             //
             // 길게 누르기와 드래그를 동시에 인식시켜, 길게 누르기가 성립한 시점에
             // 드래그가 들고 있는 시작 좌표를 그대로 쓴다. simultaneousGesture라서
@@ -138,8 +153,8 @@ struct MapModeView: View {
                              systemImage: "antenna.radiowaves.left.and.right.slash",
                              tint: Theme.warning)
             }
-            if !navigation.hasDestination {
-                StatusBanner(text: "지도를 길게 누르거나 검색해서 목적지를 정하세요.",
+            if !hasDisplayedDestination {
+                StatusBanner(text: "지도를 누르거나 검색해 경로를 확인한 뒤 깃발 버튼으로 목적지를 정하세요.",
                              systemImage: "hand.tap.fill",
                              tint: Theme.secondaryText)
             }
@@ -150,15 +165,15 @@ struct MapModeView: View {
 
     private var bottomOverlay: some View {
         VStack(spacing: 10) {
-            if navigation.hasDestination {
-                DestinationSummaryCard(navigation: navigation,
+            if hasDisplayedDestination {
+                DestinationSummaryCard(navigation: displayedNavigation,
                                        location: location,
                                        unit: appState.unitSystem,
                                        transport: appState.transport,
-                                       showsElevation: $appState.showsElevationMetrics) {
-                    Haptics.light()
-                    navigation.clearDestination()
-                }
+                                       showsElevation: $appState.showsElevationMetrics,
+                                       onConfirm: previewConfirmationAction,
+                                       onClear: clearDisplayedDestination,
+                                       clearAccessibilityLabel: isPreviewing ? "미리보기 닫기" : "목적지 지우기")
             }
             SpeedPill(speed: appState.unitSystem.speed(fromMetersPerSecond: location.speedMetersPerSecond),
                       unit: appState.unitSystem,
@@ -184,10 +199,10 @@ struct MapModeView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("현위치로 이동")
 
-            if navigation.hasDestination {
+            if hasDisplayedDestination {
                 Button {
                     Haptics.light()
-                    frameRoute()
+                    frameRoute(using: displayedNavigation)
                 } label: {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
                         .font(.headline)
@@ -200,7 +215,7 @@ struct MapModeView: View {
             }
         }
         .padding(.trailing, 16)
-        .padding(.bottom, navigation.hasDestination ? 230 : 120)
+        .padding(.bottom, hasDisplayedDestination ? 230 : 120)
     }
 
     /// 오프라인일 때 지도 위를 덮는 안내.
@@ -251,31 +266,84 @@ struct MapModeView: View {
 
     // MARK: - 동작
 
-    /// 한 번의 누름당 한 번만 찍는다.
+    private var isPreviewing: Bool {
+        previewNavigation.hasDestination
+    }
+
+    private var displayedNavigation: NavigationService {
+        isPreviewing ? previewNavigation : navigation
+    }
+
+    private var hasDisplayedDestination: Bool {
+        displayedNavigation.hasDestination
+    }
+
+    private var previewConfirmationAction: (() -> Void)? {
+        isPreviewing ? { confirmPreview() } : nil
+    }
+
+    private func clearDisplayedDestination() {
+        Haptics.light()
+        if isPreviewing {
+            cancelPreview()
+        } else {
+            navigation.clearDestination()
+        }
+    }
+
+    /// 길게 누르는 동안 한 번만 미리보기를 연다.
     private func dropPin(at point: CGPoint, proxy: MapProxy) {
         guard !didDropPin,
               let coordinate = proxy.convert(point, from: .local) else { return }
         didDropPin = true
-        apply(.droppedPin(at: coordinate))
+        preview(.droppedPin(at: coordinate))
     }
 
-    private func apply(_ destination: Destination) {
+    private func previewPin(at point: CGPoint, proxy: MapProxy) {
+        guard let coordinate = proxy.convert(point, from: .local) else { return }
+        preview(.droppedPin(at: coordinate))
+    }
+
+    private func preview(_ destination: Destination) {
+        Haptics.light()
+        previewNavigation.transport = appState.transport
+        previewNavigation.setDestination(destination,
+                                         from: location.location,
+                                         online: isOnline)
+        frameRoute(using: previewNavigation)
+    }
+
+    private func confirmPreview() {
+        guard let destination = previewNavigation.destination else { return }
         Haptics.success()
         navigation.setDestination(destination,
                                   from: location.location,
                                   online: isOnline)
-        frameRoute()
+        previewNavigation.clearDestination()
+        frameRoute(using: navigation)
+    }
+
+    private func cancelPreview() {
+        guard isPreviewing else { return }
+        previewNavigation.clearDestination()
+    }
+
+    private func refreshPreview() {
+        guard isPreviewing else { return }
+        previewNavigation.update(from: location.location,
+                                 speed: location.speedMetersPerSecond,
+                                 online: isOnline)
     }
 
     /// 현위치와 목적지가 모두 보이도록 카메라를 맞춘다.
-    private func frameRoute() {
-        if let route = navigation.route {
+    private func frameRoute(using routeNavigation: NavigationService) {
+        if let route = routeNavigation.route {
             let rect = route.polyline.boundingMapRect
             withAnimation {
                 camera = .rect(rect.insetBy(dx: -rect.width * 0.25, dy: -rect.height * 0.25))
             }
         } else if let here = location.location?.coordinate,
-                  let there = navigation.destination?.coordinate {
+                  let there = routeNavigation.destination?.coordinate {
             let center = CLLocationCoordinate2D(latitude: (here.latitude + there.latitude) / 2,
                                                 longitude: (here.longitude + there.longitude) / 2)
             let span = MKCoordinateSpan(

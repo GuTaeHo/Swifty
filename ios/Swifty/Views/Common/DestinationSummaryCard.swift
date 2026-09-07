@@ -8,7 +8,9 @@ struct DestinationSummaryCard: View {
     var unit: UnitSystem
     var transport: TransportMode
     @Binding var showsElevation: Bool
-    var onClear: (() -> Void)?
+    var onConfirm: (() -> Void)? = nil
+    var onClear: (() -> Void)? = nil
+    var clearAccessibilityLabel = "목적지 지우기"
 
     @Environment(\.palette) private var palette
 
@@ -110,6 +112,17 @@ struct DestinationSummaryCard: View {
             }
             Spacer()
             ElevationToggleButton(isOn: $showsElevation)
+            if let onConfirm {
+                Button(action: onConfirm) {
+                    Image(systemName: "flag.checkered")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.black)
+                        .frame(width: 30, height: 30)
+                        .background(palette.accent, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("목적지 설정")
+            }
             if let onClear {
                 Button(action: onClear) {
                     Image(systemName: "xmark.circle.fill")
@@ -117,7 +130,7 @@ struct DestinationSummaryCard: View {
                         .foregroundStyle(Theme.secondaryText)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("목적지 지우기")
+                .accessibilityLabel(clearAccessibilityLabel)
             }
         }
     }
